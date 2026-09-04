@@ -1,0 +1,7 @@
+recordings/
+.venv/
+__pycache__/
+*.pyc
+.env
+syntheses/
+.pytest_cache/

@@ -73,18 +73,16 @@ def doctor(
             console.print(f"[yellow]{permission.name}:[/yellow] {permission.how_to_fix}")
     console.print(f"[dim]{input_monitoring_hint()}[/dim]")
 
-    credential = credentials.resolve()
-    if credential.found:
-        ok, reason = credentials.looks_like_key(credential.key or "")
+    key = credentials.api_key()
+    if key:
+        ok, reason = credentials.looks_like_key(key)
         if ok:
-            console.print(
-                f"\nAPI key: [green]found[/green] in {credential.source} ({credential.masked()})"
-            )
+            console.print(f"\nAPI key: [green]found[/green] ({credentials.masked(key)})")
         else:
-            # Presence is not validity: a mistyped password stored here reads as
-            # "found" and then fails at the first request.
-            console.print(f"\nAPI key: [red]malformed[/red] in {credential.source} - {reason}")
-        workspace = credentials.resolve_workspace()
+            # Presence is not validity: a mistyped value reads as "found" and
+            # then fails at the first request with an unhelpful 401.
+            console.print(f"\nAPI key: [red]malformed[/red] - {reason}")
+        workspace = credentials.workspace_id()
         console.print(
             f"Workspace: {workspace}" if workspace
             else "[dim]Workspace: unset (only needed for identity-linked keys)[/dim]"

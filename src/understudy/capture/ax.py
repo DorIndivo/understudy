@@ -381,52 +381,6 @@ def focused_element(shallow: bool = True) -> Element:
         return element
 
 
-def element_at(x: float, y: float) -> Element:
-    """Resolve the element under a screen point.
-
-    Coordinates are top-left-origin screen *points* -- the same space CGEvent
-    reports -- so no flipping is needed here. (Frames, which work in pixels, do
-    have to scale; see `capture/frames.py`.)
-    """
-    element = Element()
-    try:
-        err, ref = AXUIElementCopyElementAtPosition(system_wide(), x, y, None)
-    except Exception as exc:
-        log.debug("AXUIElementCopyElementAtPosition failed at (%s, %s): %s", x, y, exc)
-        return element
-    if err != 0 or ref is None:
-        return element
-
-    AXUIElementSetMessagingTimeout(ref, MESSAGING_TIMEOUT_S)
-    return _fill(ref, element)
-
-
-def _same_role_ordinal(ref, parent) -> tuple[int | None, int | None]:
-    """Position of `ref` among its parent's children sharing its role.
-
-    Returned 1-based as (index, count). A labelled control needs no ordinal, but
-    an `AXGroup` among nine identical `AXGroup`s is only addressable by which one
-    it is -- so this is what lets a replay agent pick the right cell in a
-    calendar or the right row in a list.
-    """
-    if parent is None:
-        return None, None
-    role = _str_attr(ref, "AXRole")
-    children = _attr(parent, "AXChildren")
-    if not role or not children:
-        return None, None
-    try:
-        peers = [c for c in children if _str_attr(c, "AXRole") == role]
-    except Exception as exc:
-        log.debug("sibling scan failed: %s", exc)
-        return None, None
-    for i, peer in enumerate(peers, start=1):
-        # AX references compare by identity of the underlying element.
-        if peer == ref:
-            return i, len(peers)
-    return None, len(peers) or None
-
-
 def _ancestor_path(ref) -> list[str]:
     """Walk up AXParent, innermost first, building a stable-ish selector path.
 
@@ -452,6 +406,3 @@ def _ancestor_path(ref) -> list[str]:
     return path
 
 
-def focused_element_is_secure() -> bool:
-    """Whether keystrokes right now would land in a password field."""
-    return focused_element().secure

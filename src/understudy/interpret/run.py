@@ -63,8 +63,6 @@ def resolve_model(name: str) -> ModelSpec:
     raise typer.BadParameter(f"unknown model {name!r} - use one of: {known}")
 
 
-MODEL = MODELS[DEFAULT_MODEL].id
-
 
 @contextmanager
 def _friendly_auth_errors(console: Console):
@@ -101,14 +99,14 @@ def _friendly_auth_errors(console: Console):
 
 
 
-def _build_client(start: Path | None = None) -> anthropic.Anthropic:
+def _build_client() -> anthropic.Anthropic:
     """The SDK client, carrying a workspace id when one is configured.
 
     Identity-linked keys reject every request that does not name the workspace
     it acts in, so the header is required for those; organisation keys ignore it.
     Sent as a default header rather than per-call so `count_tokens` gets it too.
     """
-    workspace = credentials.resolve_workspace(start)
+    workspace = credentials.workspace_id()
     if workspace:
         return anthropic.Anthropic(default_headers={"anthropic-workspace-id": workspace})
     return anthropic.Anthropic()
@@ -144,15 +142,13 @@ def interpret_recording(
     image_count = sum(1 for b in blocks if b["type"] == "image")
     console.print(f"Sending {len(steps)} steps and {image_count} images to {spec.id}...")
 
-    # Pull the key from the keychain or a .env file if it isn't already exported.
-    credential = credentials.apply_to_environment(recording_dir)
-    if not credential.found:
+    if not credentials.api_key():
         console.print(
-            "[red]No API key found.[/red] Set ANTHROPIC_API_KEY in your shell, "
-            "or put it in a .env file in this directory."
+            "[red]ANTHROPIC_API_KEY is not set.[/red] Export it in your shell "
+            "(add it to ~/.zshrc so it survives new terminals)."
         )
         raise typer.Exit(1)
-    client = _build_client(recording_dir)
+    client = _build_client()
     # The system prompt is identical across recordings, so caching it makes
     # repeat runs materially cheaper.
     system = [{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}]
@@ -304,15 +300,14 @@ def synthesize_recordings(
         f"{images} images) with {spec.id}..."
     )
 
-    credential = credentials.apply_to_environment(recording_dirs[0])
-    if not credential.found:
+    if not credentials.api_key():
         console.print(
-            "[red]No API key found.[/red] Set ANTHROPIC_API_KEY in your shell, "
-            "or put it in a .env file in this directory."
+            "[red]ANTHROPIC_API_KEY is not set.[/red] Export it in your shell "
+            "(add it to ~/.zshrc so it survives new terminals)."
         )
         raise typer.Exit(1)
 
-    client = _build_client(recording_dirs[0])
+    client = _build_client()
     system = [{
         "type": "text", "text": SYNTHESIS_SYSTEM_PROMPT,
         "cache_control": {"type": "ephemeral"},

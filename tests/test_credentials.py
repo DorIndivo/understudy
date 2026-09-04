@@ -1,118 +1,60 @@
-"""Credential resolution: precedence, parsing, and never leaking the key."""
+"""Key diagnostics: reporting a malformed key as malformed, and never printing one."""
 
 from __future__ import annotations
 
-import pytest
-
 from understudy import credentials
-from understudy.credentials import Credential, parse_env_file, project_root, resolve
-
-KEY_ENV = "sk-ant-from-environment-000"
-KEY_FILE = "sk-ant-from-dotenv-file-111"
 
 
-@pytest.fixture
-def project(tmp_path, monkeypatch):
-    """An isolated project root with no key available from any source."""
-    (tmp_path / "pyproject.toml").write_text("[project]\nname='x'\n")
-    monkeypatch.delenv(credentials.ENV_VAR, raising=False)
-    return tmp_path
+class TestReadingTheEnvironment:
+    def test_an_unset_key_is_none(self, monkeypatch):
+        monkeypatch.delenv(credentials.ENV_VAR, raising=False)
+        assert credentials.api_key() is None
 
-
-def write_env(path, key=KEY_FILE):
-    (path / ".env").write_text(f"ANTHROPIC_API_KEY={key}\n")
-
-
-class TestPrecedence:
-    def test_environment_wins_over_a_dotenv_file(self, project, monkeypatch):
-        monkeypatch.setenv(credentials.ENV_VAR, KEY_ENV)
-        write_env(project)
-        result = resolve(project)
-        assert result.key == KEY_ENV and result.source == "environment"
-
-    def test_dotenv_is_the_fallback(self, project):
-        write_env(project)
-        result = resolve(project)
-        assert result.key == KEY_FILE and result.source == ".env file"
-
-    def test_nothing_anywhere_reports_none(self, project):
-        result = resolve(project)
-        assert result.key is None and result.source == "none"
-        assert result.found is False
-
-    def test_empty_environment_variable_does_not_shadow_other_sources(self, project, monkeypatch):
-        # An exported-but-empty variable is a common shell accident; it must not
-        # mask a perfectly good stored key.
+    def test_a_whitespace_only_key_is_none(self, monkeypatch):
+        # An exported-but-empty variable is a common shell accident.
         monkeypatch.setenv(credentials.ENV_VAR, "   ")
-        write_env(project)
-        assert resolve(project).source == ".env file"
+        assert credentials.api_key() is None
 
-    def test_empty_dotenv_value_reports_nothing_found(self, project):
-        (project / ".env").write_text("ANTHROPIC_API_KEY=\n")
-        assert resolve(project).source == "none"
+    def test_surrounding_whitespace_is_stripped(self, monkeypatch):
+        monkeypatch.setenv(credentials.ENV_VAR, "  sk-ant-abc  ")
+        assert credentials.api_key() == "sk-ant-abc"
 
+    def test_workspace_id_reads_its_own_variable(self, monkeypatch):
+        monkeypatch.setenv(credentials.WORKSPACE_ENV_VAR, "wrkspc_01ABC")
+        assert credentials.workspace_id() == "wrkspc_01ABC"
 
-class TestEnvFileParsing:
-    def test_quotes_comments_and_export_prefix(self, tmp_path):
-        (tmp_path / ".env").write_text(
-            '# a comment\n'
-            '\n'
-            'export ANTHROPIC_API_KEY="sk-quoted"\n'
-            "OTHER='single'\n"
-            'PLAIN=bare\n'
-            'MALFORMED\n'
-        )
-        values = parse_env_file(tmp_path / ".env")
-        assert values["ANTHROPIC_API_KEY"] == "sk-quoted"
-        assert values["OTHER"] == "single"
-        assert values["PLAIN"] == "bare"
-        assert "MALFORMED" not in values
-
-    def test_missing_file_is_not_an_error(self, tmp_path):
-        assert parse_env_file(tmp_path / "absent.env") == {}
-
-    def test_value_containing_equals_is_preserved(self, tmp_path):
-        (tmp_path / ".env").write_text("ANTHROPIC_API_KEY=abc=def==\n")
-        assert parse_env_file(tmp_path / ".env")["ANTHROPIC_API_KEY"] == "abc=def=="
+    def test_an_unset_workspace_is_none(self, monkeypatch):
+        monkeypatch.delenv(credentials.WORKSPACE_ENV_VAR, raising=False)
+        assert credentials.workspace_id() is None
 
 
-class TestProjectRoot:
-    def test_found_from_a_nested_directory(self, tmp_path):
-        (tmp_path / "pyproject.toml").write_text("[project]\nname='x'\n")
-        nested = tmp_path / "a" / "b"
-        nested.mkdir(parents=True)
-        assert project_root(nested) == tmp_path.resolve()
+class TestKeyShape:
+    def test_a_real_looking_key_passes(self):
+        ok, reason = credentials.looks_like_key("sk-ant-api03-" + "x" * 90)
+        assert ok and reason == ""
 
-    def test_dotenv_is_found_from_a_subdirectory(self, project, monkeypatch):
-        write_env(project)
-        nested = project / "deep" / "deeper"
-        nested.mkdir(parents=True)
-        assert resolve(nested).key == KEY_FILE
+    def test_a_password_typed_by_mistake_is_rejected(self):
+        # The accident this check exists for.
+        ok, reason = credentials.looks_like_key("d1d2d3d4!")
+        assert not ok and "sk-ant-" in reason
+
+    def test_a_truncated_key_is_rejected(self):
+        ok, reason = credentials.looks_like_key("sk-ant-abc")
+        assert not ok and "too short" in reason
+
+    def test_nothing_is_rejected(self):
+        ok, reason = credentials.looks_like_key("   ")
+        assert not ok and reason == "nothing entered"
 
 
 class TestMasking:
     def test_a_long_key_is_partially_hidden(self):
-        masked = Credential("sk-ant-api03-abcdefghijklmnop", ".env file").masked()
+        masked = credentials.masked("sk-ant-api03-abcdefghijklmnop")
         assert "abcdefghijkl" not in masked
         assert masked.startswith("sk-ant-a") and masked.endswith("mnop")
 
     def test_a_short_secret_is_fully_hidden(self):
-        assert Credential("shortkey", ".env file").masked() == "set"
+        assert credentials.masked("shortkey") == "set"
 
     def test_absent_key_masks_to_a_dash(self):
-        assert Credential(None, "none").masked() == "-"
-
-
-class TestApplyToEnvironment:
-    def test_a_dotenv_key_is_exposed_to_the_sdk(self, project):
-        write_env(project)
-        credentials.apply_to_environment(project)
-        import os
-        assert os.environ[credentials.ENV_VAR] == KEY_FILE
-
-    def test_an_existing_export_is_not_overwritten(self, project, monkeypatch):
-        monkeypatch.setenv(credentials.ENV_VAR, KEY_ENV)
-        write_env(project)
-        credentials.apply_to_environment(project)
-        import os
-        assert os.environ[credentials.ENV_VAR] == KEY_ENV
+        assert credentials.masked(None) == "-"

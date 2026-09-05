@@ -16,6 +16,7 @@ from understudy.capture.session import RecordingSession
 from understudy.permissions import check_all, input_monitoring_hint
 from understudy.trace.models import Action, Step
 from understudy.trace.recording import Recording, RecordingError
+from understudy.trace.redact import Redactor
 
 app = typer.Typer(
     add_completion=False,

@@ -64,3 +64,35 @@ class TestElementAndAppAt:
 
         _, app = ax.element_and_app_at(10, 20)
         assert app.name == "Finder"
+
+
+class TestRealResolution:
+    """Exercise the unmocked path.
+
+    The existing tests monkeypatch `_fill`, so a missing name inside it stayed
+    invisible: a helper deleted with an adjacent function left every recording
+    with no accessibility data for two commits, and the suite stayed green. These
+    call the real thing. They assert only that it does not raise and returns the
+    right shape -- whatever is actually on screen is not the point.
+    """
+
+    def test_resolution_returns_a_pair_without_raising(self):
+        element, app = ax.element_and_app_at(10, 10)
+        assert isinstance(element, Element)
+        assert isinstance(app, AppContext)
+
+    def test_every_helper_fill_depends_on_exists(self):
+        # The specific failure: `_fill` called a helper that had been deleted.
+        for name in ("_same_role_ordinal", "_ancestor_path", "harvest_label", "_frame"):
+            assert callable(getattr(ax, name, None)), f"ax.{name} is missing"
+
+    def test_a_broken_fill_degrades_instead_of_raising(self, monkeypatch):
+        """The contract: AX enriches, it never gates."""
+        monkeypatch.setattr(ax, "_fill", _explode)
+        element, app = ax.element_and_app_at(10, 10)
+        assert element.resolved is False      # degraded, not raised
+        assert isinstance(app, AppContext)
+
+
+def _explode(*args, **kwargs):
+    raise NameError("simulating a helper deleted by a refactor")

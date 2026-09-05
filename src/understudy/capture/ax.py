@@ -237,7 +237,15 @@ def element_and_app_at(x: float, y: float) -> tuple[Element, AppContext]:
         return element, frontmost_app()
 
     AXUIElementSetMessagingTimeout(ref, MESSAGING_TIMEOUT_S)
-    element = _fill(ref, element)
+    try:
+        element = _fill(ref, element)
+    except Exception:
+        # AX enriches a step; it must never gate one. A fault in here previously
+        # escaped to the caller, where the session's blanket guard turned it into
+        # a recording with no accessibility data at all and no error anywhere --
+        # exactly the silent degradation this layer is supposed to prevent.
+        log.exception("filling the element at (%s, %s) failed", x, y)
+        element = Element()
 
     try:
         err_pid, pid = AXUIElementGetPid(ref, None)
@@ -379,6 +387,32 @@ def focused_element(shallow: bool = True) -> Element:
         return _fill(ref, element, shallow=shallow)
     except Exception:
         return element
+
+
+def _same_role_ordinal(ref, parent) -> tuple[int | None, int | None]:
+    """Position of `ref` among its parent's children sharing its role.
+
+    Returned 1-based as (index, count). A labelled control needs no ordinal, but
+    an `AXGroup` among nine identical `AXGroup`s is only addressable by which one
+    it is -- so this is what lets a replay agent pick the right cell in a
+    calendar or the right row in a list.
+    """
+    if parent is None:
+        return None, None
+    role = _str_attr(ref, "AXRole")
+    children = _attr(parent, "AXChildren")
+    if not role or not children:
+        return None, None
+    try:
+        peers = [c for c in children if _str_attr(c, "AXRole") == role]
+    except Exception as exc:
+        log.debug("sibling scan failed: %s", exc)
+        return None, None
+    for i, peer in enumerate(peers, start=1):
+        # AX references compare by identity of the underlying element.
+        if peer == ref:
+            return i, len(peers)
+    return None, len(peers) or None
 
 
 def _ancestor_path(ref) -> list[str]:

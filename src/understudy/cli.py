@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import time
 from datetime import datetime
 from pathlib import Path
@@ -15,9 +14,8 @@ from rich.table import Table
 from understudy import credentials
 from understudy.capture.session import RecordingSession
 from understudy.permissions import check_all, input_monitoring_hint
-from understudy.trace.models import Action, Manifest, Step
-from understudy.trace.normalize import load_events, normalize, write_steps
-from understudy.trace.redact import Redactor
+from understudy.trace.models import Action, Step
+from understudy.trace.recording import Recording, RecordingError
 
 app = typer.Typer(
     add_completion=False,
@@ -152,17 +150,18 @@ def record(
     )
     session.run()
 
-    steps = _normalize_recording(out_dir)
+    steps = _open(out_dir).normalize(force=True)
     console.print(f"[green]Done.[/green] {len(steps)} steps captured.")
     console.print(f"Inspect with: [bold]understudy inspect {out_dir}[/bold]")
 
 
-def _normalize_recording(out_dir: Path) -> list[Step]:
-    events = load_events(out_dir / "events.jsonl")
-    manifest = Manifest.model_validate_json((out_dir / "manifest.json").read_text())
-    steps = normalize(events, Redactor(manifest.redaction_patterns or None))
-    write_steps(steps, out_dir / "steps.json")
-    return steps
+def _open(directory: Path) -> Recording:
+    """Open a recording, or fail with the reason rather than a traceback."""
+    try:
+        return Recording.open(directory)
+    except RecordingError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from None
 
 
 @app.command()
@@ -173,12 +172,10 @@ def inspect(
     ),
 ) -> None:
     """Show a recording as a readable timeline. Do this before spending an API call."""
-    steps_path = recording / "steps.json"
-    if renormalize or not steps_path.exists():
-        _normalize_recording(recording)
-
-    manifest = Manifest.model_validate_json((recording / "manifest.json").read_text())
-    steps = [Step.model_validate(s) for s in json.loads(steps_path.read_text())]
+    rec = _open(recording)
+    if renormalize:
+        rec.normalize(force=True)
+    steps, manifest = rec.steps, rec.manifest
 
     console.print(
         Panel(
@@ -186,7 +183,7 @@ def inspect(
             + f"{manifest.duration_s:.1f}s  |  {len(steps)} steps  |  "
             f"started {manifest.started_at}\n"
             f"permissions: {manifest.permissions}",
-            title=manifest.recording_id,
+            title=rec.id,
         )
     )
 
@@ -233,58 +230,64 @@ def interpret(
     model: str = typer.Option(
         "opus", "--model", "-m", help="opus | sonnet | haiku, or a full model id."
     ),
-    list_runs: bool = typer.Option(
-        False, "--list", help="List saved runs for this recording and exit."
+    list_analyses: bool = typer.Option(
+        False, "--list", help="List saved analyses of this recording and exit."
     ),
     show: int | None = typer.Option(
-        None, "--show", help="Re-display a saved run by number, without calling the API."
+        None, "--show", help="Re-display a saved analysis by number, without calling the API."
     ),
 ) -> None:
     """Turn a recording into an SOP and an agent-executable procedure.
 
-    Every run is kept under `<recording>/interpretations/NNN/`; `--list` shows
-    them and `--show N` reprints one for free.
+    Every analysis is kept under `<recording>/interpretations/NNN/`; `--list`
+    shows them and `--show N` reprints one for free.
     """
-    from understudy.interpret import versions
-    from understudy.interpret.run import interpret_recording, report_result
+    from understudy.interpret.passes import InterpretPass, report_interpretation
+    from understudy.interpret.schema import Interpretation
 
-    if list_runs:
-        saved = versions.list_versions(recording)
-        if not saved:
-            console.print("[yellow]No interpretations saved yet.[/yellow]")
-            raise typer.Exit(1)
-        table = Table(show_header=True, header_style="bold")
-        for column in ("run", "when", "effort", "steps", "conf", "tokens", "cached", "cost"):
-            table.add_column(column)
-        for version in saved:
-            m = version.meta
-            table.add_row(
-                f"{version.number:03d}",
-                version.created.replace("T", " ").replace("+00:00", ""),
-                str(m.get("effort", "?")),
-                f"{m.get('procedure_steps', '?')}",
-                str(m.get("confidence", "?")),
-                f"{m.get('input_tokens', 0):,}/{m.get('output_tokens', 0):,}",
-                f"{m.get('cached_tokens', 0):,}",
-                f"${m.get('cost_usd', 0):.3f}",
-            )
-        console.print(table)
-        console.print(f"[dim]Files under {versions.runs_dir(recording)}[/dim]")
+    rec = _open(recording)
+
+    if list_analyses:
+        _show_analysis_table(rec.analyses)
         return
 
     if show is not None:
-        version = versions.find(recording, show)
-        if version is None:
-            console.print(f"[red]No run {show:03d}[/red] for this recording. Try --list.")
+        analysis = rec.analyses.find(show)
+        if analysis is None:
+            console.print(f"[red]No analysis {show:03d}[/red] for this recording. Try --list.")
             raise typer.Exit(1)
-        console.print(f"[dim]Run {version.number:03d} - {version.created}[/dim]")
-        report_result(console, version.load(), version.path)
+        console.print(f"[dim]Analysis {analysis.number:03d} - {analysis.created}[/dim]")
+        report_interpretation(console, analysis.load(Interpretation))
         return
 
-    interpret_recording(
-        recording, effort=effort, max_images=max_images, dry_run=dry_run,
-        console=console, model=model,
+    InterpretPass(rec, max_images=max_images).run(
+        rec.analyses, model=model, effort=effort, dry_run=dry_run, console=console
     )
+
+
+def _show_analysis_table(store) -> None:
+    saved = store.list()
+    if not saved:
+        console.print("[yellow]No analyses saved yet.[/yellow]")
+        raise typer.Exit(1)
+    table = Table(show_header=True, header_style="bold")
+    for column in ("#", "when", "model", "effort", "steps", "conf", "tokens", "cached", "cost"):
+        table.add_column(column)
+    for analysis in saved:
+        m = analysis.meta
+        table.add_row(
+            f"{analysis.number:03d}",
+            analysis.created.replace("T", " ").replace("+00:00", ""),
+            str(m.get("model", "?")).removeprefix("claude-"),
+            str(m.get("effort", "?")),
+            f"{m.get('procedure_steps', '?')}",
+            str(m.get("confidence", "?")),
+            f"{m.get('input_tokens', 0):,}/{m.get('output_tokens', 0):,}",
+            f"{m.get('cached_tokens', 0):,}",
+            f"${m.get('cost_usd', 0):.3f}",
+        )
+    console.print(table)
+    console.print(f"[dim]Files under {store.analyses_dir}[/dim]")
 
 
 @app.command()
@@ -297,17 +300,20 @@ def synthesize(
     max_images_each: int = typer.Option(12, "--max-images-each", help="Frame cap per recording."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Estimate cost without calling the API."),
 ) -> None:
-    """Recover one procedure, with its branches, by comparing several runs.
+    """Recover one procedure, with its branches, by comparing several recordings.
 
-    A single recording shows which path was taken; only several runs can show what
-    the choice turned on. Give it two or more recordings of the same task.
+    A single recording shows which path was taken; only several can show what the
+    choice turned on. Give it two or more recordings of the same task.
     """
-    from understudy.interpret.run import synthesize_recordings
+    from understudy.interpret.analyses import AnalysisStore
+    from understudy.interpret.passes import SynthesizePass
 
+    opened = [_open(d) for d in recordings]
     out_dir = out / (name or datetime.now().strftime("%Y-%m-%dT%H-%M-%S"))
-    synthesize_recordings(
-        recordings, out_dir=out_dir, effort=effort, max_images_each=max_images_each,
-        dry_run=dry_run, console=console, model=model,
+    # A synthesis belongs to no single recording, so its analyses live in a
+    # store of their own rather than inside one of the inputs.
+    SynthesizePass(opened, max_images_each=max_images_each).run(
+        AnalysisStore(out_dir), model=model, effort=effort, dry_run=dry_run, console=console
     )
 
 
